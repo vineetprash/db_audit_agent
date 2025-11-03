@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  role      String   @default("Faculty") // Admin, Dean, Faculty, Student
+  rollNo    String?  @map("roll_no") // For students only
+  marks     Int?     // For students only
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Course {
+  id          Int      @id @default(autoincrement())
+  name        String
+  code        String   @unique
+  credits     Int      @default(3)
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  tableName  String   @map("table_name")
+  operation  String
+  userName   String   @map("user_name")
+  oldData    Json?    @map("old_data")
+  newData    Json?    @map("new_data")
+  timestamp  DateTime @default(now())
+
+  @@index([timestamp])
+  @@index([tableName])
+}
+
+model SuspiciousActivity {
+  id        Int      @id @default(autoincrement())
+  logId     Int?     @map("log_id")
+  message   String
+  severity  String
+  details   Json
+  timestamp DateTime @default(now())
+
+  @@index([timestamp])
+}
