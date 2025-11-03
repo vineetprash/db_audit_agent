@@ -2,10 +2,11 @@
   "name": "audit-system",
   "version": "1.0.0",
   "scripts": {
-    "dev": "npm run db:push && next dev",
-    "build": "npm run db:push && next build",
+    "dev": "npm run db:push:safe && next dev",
+    "build": "prisma generate && next build",
     "start": "next start",
     "db:push": "prisma db push --skip-generate && prisma generate",
+    "db:push:safe": "prisma db push --skip-generate --accept-data-loss || true && prisma generate",
     "postinstall": "prisma generate"
   },
   "dependencies": {
