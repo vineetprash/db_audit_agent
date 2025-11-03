@@ -1,15 +1,19 @@
 import { NextApiRequest, NextApiResponse } from 'next';
-import { prisma } from '@/lib/prisma';
+import { dbConnection } from '@/lib/dbConnection';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const logs = await prisma.auditLog.findMany({
-    orderBy: { timestamp: 'desc' },
-    take: 100,
-  });
+  try {
+    const result = await dbConnection.query(
+      `SELECT * FROM "AuditLog" ORDER BY timestamp DESC LIMIT 100`
+    );
 
-  res.status(200).json(logs);
+    res.status(200).json(result.rows);
+  } catch (error: any) {
+    console.error('Database error:', error);
+    res.status(500).json({ error: error.message });
+  }
 }

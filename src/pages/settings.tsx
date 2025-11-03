@@ -1,5 +1,5 @@
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useTheme } from '@/contexts/ThemeContext';
 
 export default function Settings() {
@@ -13,6 +13,18 @@ export default function Settings() {
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const { dark } = useTheme();
+
+  // Load saved credentials on mount
+  useEffect(() => {
+    const savedConfig = localStorage.getItem('dbConfig');
+    if (savedConfig) {
+      try {
+        setConfig(JSON.parse(savedConfig));
+      } catch (e) {
+        console.error('Failed to load saved config:', e);
+      }
+    }
+  }, []);
 
   const handleConnect = async () => {
     setLoading(true);
@@ -29,6 +41,8 @@ export default function Settings() {
       });
 
       if (res.ok) {
+        // Save credentials to localStorage on successful connection
+        localStorage.setItem('dbConfig', JSON.stringify(config));
         setStatus('✅ Connected successfully! Audit triggers installed.');
       } else {
         const data = await res.json();
