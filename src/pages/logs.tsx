@@ -13,6 +13,8 @@ interface AuditLog {
   oldData?: Record<string, any> | null;
   newData?: Record<string, any> | null;
   timestamp: string;
+  readableOld?: string;
+  readableNew?: string;
 }
 
 export default function Logs() {
@@ -34,18 +36,37 @@ export default function Logs() {
         // Connect socket.io
         newSocket = io({
           path: '/api/socket',
+          transports: ['websocket', 'polling'],
         });
 
         newSocket.on('connect', () => {
           console.log('✅ Connected to Socket.IO');
         });
 
+        newSocket.on('disconnect', () => {
+          console.log('❌ Disconnected from Socket.IO');
+        });
+
+        newSocket.on('connect_error', (error) => {
+          console.error('❌ Socket.IO connection error:', error);
+        });
+
+        newSocket.on('connected', (data) => {
+          console.log('📨 Socket.IO welcomed:', data);
+        });
+
         newSocket.on('audit_log', (log: AuditLog) => {
+          console.log('📨 Received audit log:', log);
           setLogs((prev) => [log, ...prev].slice(0, 100));
         });
 
         // Optional: trigger backend to start stream
-        await fetch('/api/logs/stream', { method: 'POST' });
+        const streamRes = await fetch('/api/logs/stream', { method: 'POST' });
+        const streamData = await streamRes.json();
+        
+        if (!streamData.connected) {
+          console.warn('Database not connected:', streamData.message);
+        }
 
         setSocket(newSocket);
       } catch (err) {
@@ -150,6 +171,24 @@ export default function Logs() {
               <div className="text-sm mb-4" style={{ color: dark ? '#a1a1aa' : '#71717a' }}>
                 User: <span className="font-medium" style={{ color: dark ? '#fff' : '#000' }}>{log.userName}</span>
               </div>
+
+              {/* Show readable summary if available */}
+              {(log.readableOld || log.readableNew) && (
+                <div className="mb-4 space-y-2">
+                  {log.readableOld && (
+                    <div className="text-sm">
+                      <span style={{ color: dark ? '#f87171' : '#991b1b' }} className="font-medium">Old:</span>{' '}
+                      <span style={{ color: dark ? '#a1a1aa' : '#71717a' }}>{log.readableOld}</span>
+                    </div>
+                  )}
+                  {log.readableNew && (
+                    <div className="text-sm">
+                      <span style={{ color: dark ? '#4ade80' : '#15803d' }} className="font-medium">New:</span>{' '}
+                      <span style={{ color: dark ? '#a1a1aa' : '#71717a' }}>{log.readableNew}</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {(log.oldData || log.newData) && (
                 <details className="text-sm">

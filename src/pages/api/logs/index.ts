@@ -7,13 +7,38 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
+    // Check if using default localhost config and handle gracefully
+    if (dbConnection.isUsingDefaults()) {
+      // Return empty array if no database configured yet
+      return res.status(200).json([]);
+    }
+
     const result = await dbConnection.query(
       `SELECT * FROM "AuditLog" ORDER BY timestamp DESC LIMIT 100`
     );
 
-    res.status(200).json(result.rows);
+    // Transform database field names to match frontend interface
+    const transformedLogs = result.rows.map(row => ({
+      id: row.id,
+      tableName: row.table_name,
+      operation: row.operation,
+      userName: row.user_name,
+      oldData: row.old_data,
+      newData: row.new_data,
+      timestamp: row.timestamp
+    }));
+
+    res.status(200).json(transformedLogs);
   } catch (error: any) {
     console.error('Database error:', error);
-    res.status(500).json({ error: error.message });
+    // Return empty array instead of error if database not reachable
+    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.code === 'ETIMEDOUT') {
+      console.log('⚠️ Database connection failed, returning empty logs array');
+      return res.status(200).json([]);
+    }
+    
+    // For other errors, still return empty array to prevent frontend breakage
+    console.log('⚠️ Database error occurred, returning empty logs array to prevent frontend breakage');
+    return res.status(200).json([]);
   }
 }

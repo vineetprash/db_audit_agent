@@ -20,53 +20,109 @@ export default function Database() {
     loadRecords();
   }, [table]);
 
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   const loadRecords = async () => {
     try {
+      setLoading(true);
+      setError(null);
       const res = await fetch(`/api/tables/${table}`);
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        if (res.status === 503 && errorData.code === 'DB_CONNECTION_ERROR') {
+          setError('Database not connected. Please configure database settings first.');
+          setRecords([]);
+          return;
+        }
+        throw new Error(errorData.error || 'Failed to fetch records');
+      }
+      
       const data = await res.json();
-      setRecords(data);
-    } catch (err) {
+      setRecords(data || []);
+    } catch (err: any) {
       console.error('Error fetching records:', err);
+      setError(err.message || 'Failed to load records. Please check your database connection.');
+      setRecords([]);
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleCreate = async () => {
     try {
-      await fetch(`/api/tables/${table}`, {
+      setError(null);
+      const res = await fetch(`/api/tables/${table}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData),
       });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        if (res.status === 503) {
+          setError('Database not connected. Please configure database settings first.');
+          return;
+        }
+        throw new Error(errorData.error || 'Failed to create record');
+      }
+      
       setFormData({});
       setCreating(false);
       loadRecords();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error creating record:', err);
+      setError(err.message || 'Failed to create record. Please check your database connection.');
     }
   };
 
   const handleUpdate = async (id: number) => {
     try {
-      await fetch(`/api/tables/${table}/${id}`, {
+      setError(null);
+      const res = await fetch(`/api/tables/${table}/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData),
       });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        if (res.status === 503) {
+          setError('Database not connected. Please configure database settings first.');
+          return;
+        }
+        throw new Error(errorData.error || 'Failed to update record');
+      }
+      
       setEditing(null);
       setFormData({});
       loadRecords();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error updating record:', err);
+      setError(err.message || 'Failed to update record. Please check your database connection.');
     }
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Are you sure you want to delete this record?')) return;
     try {
-      await fetch(`/api/tables/${table}/${id}`, { method: 'DELETE' });
+      setError(null);
+      const res = await fetch(`/api/tables/${table}/${id}`, { method: 'DELETE' });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        if (res.status === 503) {
+          setError('Database not connected. Please configure database settings first.');
+          return;
+        }
+        throw new Error(errorData.error || 'Failed to delete record');
+      }
+      
       loadRecords();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error deleting record:', err);
+      setError(err.message || 'Failed to delete record. Please check your database connection.');
     }
   };
 
@@ -97,7 +153,7 @@ export default function Database() {
             Database Management
           </h1>
           <p className="text-lg mt-2" style={{ color: dark ? '#a1a1aa' : '#71717a' }}>
-            {records.length} {table === 'users' ? 'user' : 'course'}{records.length !== 1 && 's'}
+            {loading ? 'Loading...' : `${records.length} ${table === 'users' ? 'user' : 'course'}${records.length !== 1 ? 's' : ''}`}
           </p>
         </div>
         <select
@@ -118,6 +174,25 @@ export default function Database() {
           <option value="courses">Courses</option>
         </select>
       </div>
+
+      {/* Error Display */}
+      {error && (
+        <div 
+          className="border-l-4 p-4 rounded-lg"
+          style={{
+            borderLeftColor: '#f87171',
+            backgroundColor: dark ? 'rgba(239, 68, 68, 0.1)' : '#fef2f2',
+            color: dark ? '#fca5a5' : '#dc2626'
+          }}
+        >
+          <div className="flex items-center">
+            <svg className="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+            </svg>
+            <span className="font-medium">{error}</span>
+          </div>
+        </div>
+      )}
 
       {/* Create New */}
       <button

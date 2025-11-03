@@ -1,5 +1,10 @@
 import { Client } from 'pg';
 
+// Use global to ensure true singleton across hot reloads
+declare global {
+  var __auditAgent: AuditAgent | undefined;
+}
+
 export class AuditAgent {
   private client: Client | null = null;
   private listener: Client | null = null;
@@ -13,11 +18,42 @@ export class AuditAgent {
     user: string;
     password: string;
   }) {
+    // Check if already connected with same config
+    if (this.client && this.config && 
+        this.config.host === config.host &&
+        this.config.database === config.database &&
+        this.config.user === config.user) {
+      console.log('� AuditAgent already connected with same config');
+      return true;
+    }
+
+    console.log('�🔗 AuditAgent connecting to:', { host: config.host, database: config.database });
+    
+    // Close existing connections
+    if (this.client) {
+      await this.client.end().catch(() => {});
+    }
+    if (this.listener) {
+      await this.listener.end().catch(() => {});
+      this.isListening = false;
+    }
+
     this.config = config;
-    this.client = new Client(config);
+    
+    // Add SSL configuration for Supabase and other cloud databases
+    const clientConfig = {
+      ...config,
+      ssl: config.host.includes('supabase.co') || config.host.includes('amazonaws.com') || config.host.includes('azure.com')
+        ? { rejectUnauthorized: false }
+        : false
+    };
+
+    this.client = new Client(clientConfig);
     await this.client.connect();
     await this.createTablesIfNotExist();
     await this.setupAuditInfrastructure();
+    
+    console.log('✅ AuditAgent connected successfully');
     return true;
   }
 
@@ -87,41 +123,47 @@ export class AuditAgent {
       EXECUTE FUNCTION update_updated_at_column();
     `);
 
-    // Create Course table (only if not exists)
-    await this.client.query(`
-      CREATE TABLE IF NOT EXISTS "Course" (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        code VARCHAR(50) UNIQUE NOT NULL,
-        credits INTEGER DEFAULT 3,
-        description TEXT,
-        "createdAt" TIMESTAMP DEFAULT NOW() NOT NULL,
-        "updatedAt" TIMESTAMP DEFAULT NOW() NOT NULL
-      )
+    // Check if Course table exists and has correct schema
+    const courseTableExists = await this.client.query(`
+      SELECT column_name, column_default, is_nullable 
+      FROM information_schema.columns 
+      WHERE table_name = 'Course' AND table_schema = 'public'
     `);
 
-    // Alter existing Course columns to add defaults if they don't have them
-    await this.client.query(`
-      DO $$ 
-      BEGIN
-        BEGIN
-          ALTER TABLE "Course" ALTER COLUMN "createdAt" SET DEFAULT NOW();
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-        BEGIN
-          ALTER TABLE "Course" ALTER COLUMN "updatedAt" SET DEFAULT NOW();
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-        BEGIN
-          ALTER TABLE "Course" ALTER COLUMN "createdAt" SET NOT NULL;
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-        BEGIN
-          ALTER TABLE "Course" ALTER COLUMN "updatedAt" SET NOT NULL;
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-      END $$;
-    `);
+    if (courseTableExists.rows.length === 0) {
+      // Create Course table from scratch
+      await this.client.query(`
+        CREATE TABLE "Course" (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          code VARCHAR(50) UNIQUE NOT NULL,
+          credits INTEGER DEFAULT 3,
+          description TEXT,
+          "createdAt" TIMESTAMP DEFAULT NOW() NOT NULL,
+          "updatedAt" TIMESTAMP DEFAULT NOW() NOT NULL
+        )
+      `);
+    } else {
+      // Check if columns have proper defaults
+      const hasCreatedAtDefault = courseTableExists.rows.find(r => r.column_name === 'createdAt')?.column_default;
+      const hasUpdatedAtDefault = courseTableExists.rows.find(r => r.column_name === 'updatedAt')?.column_default;
+
+      if (!hasCreatedAtDefault || !hasUpdatedAtDefault) {
+        // Recreate table with proper schema
+        await this.client.query(`DROP TABLE "Course" CASCADE`);
+        await this.client.query(`
+          CREATE TABLE "Course" (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            code VARCHAR(50) UNIQUE NOT NULL,
+            credits INTEGER DEFAULT 3,
+            description TEXT,
+            "createdAt" TIMESTAMP DEFAULT NOW() NOT NULL,
+            "updatedAt" TIMESTAMP DEFAULT NOW() NOT NULL
+          )
+        `);
+      }
+    }
 
     // Create trigger to auto-update updatedAt for Course table
     await this.client.query(`
@@ -172,33 +214,58 @@ export class AuditAgent {
   private async setupAuditInfrastructure() {
     if (!this.client) throw new Error('Not connected');
 
-    // Create audit function
+    // First, clean up ALL existing audit triggers to prevent conflicts
+    console.log('🧹 Cleaning up existing audit triggers...');
+    const allTables = await this.client.query(`
+      SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+    `);
+    
+    for (const row of allTables.rows) {
+      await this.client.query(`DROP TRIGGER IF EXISTS audit_trigger ON "${row.tablename}"`);
+    }
+
+    // Create super simple audit function with error handling
     await this.client.query(`
       CREATE OR REPLACE FUNCTION audit_trigger_func()
       RETURNS TRIGGER AS $$
       DECLARE
-        old_data JSON;
-        new_data JSON;
+        app_user_name TEXT DEFAULT 'System';
       BEGIN
-        IF (TG_OP = 'DELETE') THEN
-          old_data = row_to_json(OLD);
-          new_data = NULL;
-        ELSIF (TG_OP = 'UPDATE') THEN
-          old_data = row_to_json(OLD);
-          new_data = row_to_json(NEW);
-        ELSIF (TG_OP = 'INSERT') THEN
-          old_data = NULL;
-          new_data = row_to_json(NEW);
-        END IF;
+        -- Get application user name from session variable if available
+        BEGIN
+          SELECT current_setting('app.current_user_name', true) INTO app_user_name;
+          IF app_user_name IS NULL OR app_user_name = '' THEN
+            app_user_name := 'System';
+          END IF;
+        EXCEPTION WHEN OTHERS THEN
+          app_user_name := 'System';
+        END;
 
-        PERFORM pg_notify('audit_channel', json_build_object(
-          'table_name', TG_TABLE_NAME,
-          'operation', TG_OP,
-          'user_name', current_user,
-          'old_data', old_data,
-          'new_data', new_data,
-          'timestamp', now()
-        )::text);
+        -- Insert audit log with explicit error handling
+        BEGIN
+          INSERT INTO "AuditLog" (table_name, operation, user_name, old_data, new_data, timestamp)
+          VALUES (
+            TG_TABLE_NAME,
+            TG_OP,
+            app_user_name,
+            CASE WHEN TG_OP = 'DELETE' THEN row_to_json(OLD) ELSE NULL END,
+            CASE WHEN TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN row_to_json(NEW) ELSE NULL END,
+            NOW()
+          );
+        EXCEPTION WHEN OTHERS THEN
+          -- Log error to PostgreSQL log
+          RAISE WARNING 'Audit trigger failed: %', SQLERRM;
+          -- Continue execution even if audit fails
+        END;
+
+        -- Send notification (simplified)
+        BEGIN
+          PERFORM pg_notify('audit_channel', 
+            format('{"table":"%s","operation":"%s","user":"%s"}', 
+              TG_TABLE_NAME, TG_OP, app_user_name));
+        EXCEPTION WHEN OTHERS THEN
+          -- Ignore notification errors
+        END;
 
         IF (TG_OP = 'DELETE') THEN
           RETURN OLD;
@@ -209,21 +276,32 @@ export class AuditAgent {
       $$ LANGUAGE plpgsql;
     `);
 
-    // Install triggers on all tables
-    const tables = await this.client.query(`
-      SELECT tablename FROM pg_tables 
-      WHERE schemaname = 'public'
-    `);
-
-    for (const row of tables.rows) {
-      const tableName = row.tablename;
-      await this.client.query(`
-        DROP TRIGGER IF EXISTS audit_trigger ON "${tableName}";
-        CREATE TRIGGER audit_trigger
-        AFTER INSERT OR UPDATE OR DELETE ON "${tableName}"
-        FOR EACH ROW EXECUTE FUNCTION audit_trigger_func();
-      `);
+    // Only install triggers on specific business tables we want to audit
+    const tablesToAudit = ['User', 'Course'];
+    
+    for (const tableName of tablesToAudit) {
+      // Check if table exists first
+      const tableExists = await this.client.query(`
+        SELECT 1 FROM pg_tables WHERE tablename = $1 AND schemaname = 'public'
+      `, [tableName]);
+      
+      if (tableExists.rows.length > 0) {
+        console.log(`📋 Installing audit trigger on ${tableName}`);
+        // Drop existing trigger first
+        await this.client.query(`DROP TRIGGER IF EXISTS audit_trigger ON "${tableName}"`);
+        // Create new trigger
+        await this.client.query(`
+          CREATE TRIGGER audit_trigger
+          AFTER INSERT OR UPDATE OR DELETE ON "${tableName}"
+          FOR EACH ROW EXECUTE FUNCTION audit_trigger_func();
+        `);
+        console.log(`✅ Audit trigger installed on ${tableName}`);
+      } else {
+        console.log(`⚠️ Table ${tableName} does not exist, skipping trigger installation`);
+      }
     }
+    
+    console.log('✅ Audit infrastructure setup complete');
   }
 
   async startListening(callback: (notification: any) => void) {
@@ -233,16 +311,17 @@ export class AuditAgent {
       return;
     }
 
+    console.log('🔍 AuditAgent current state:', { 
+      hasClient: !!this.client, 
+      hasConfig: !!this.config,
+      configHost: this.config?.host 
+    });
+
     // Auto-connect if not already connected
     if (!this.client) {
-      const dbConfig = {
-        host: process.env.AUDIT_DB_HOST || 'localhost',
-        port: parseInt(process.env.AUDIT_DB_PORT || '5432'),
-        database: process.env.AUDIT_DB_NAME || 'postgres',
-        user: process.env.AUDIT_DB_USER || 'postgres',
-        password: process.env.AUDIT_DB_PASSWORD || '',
-      };
-      await this.connect(dbConfig);
+      // Server-side can't access localStorage, so we need a different approach
+      // For now, require explicit connection via Settings first
+      throw new Error('Audit agent not connected. Please connect via Settings page first.');
     }
 
     // Use the stored config
@@ -271,4 +350,12 @@ export class AuditAgent {
   }
 }
 
-export const auditAgent = new AuditAgent();
+function getAuditAgent(): AuditAgent {
+  if (!global.__auditAgent) {
+    console.log('🏗️ Creating new AuditAgent instance');
+    global.__auditAgent = new AuditAgent();
+  }
+  return global.__auditAgent;
+}
+
+export const auditAgent = getAuditAgent();
