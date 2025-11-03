@@ -16,6 +16,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponseS
   }
 
   try {
+    // Check if database is configured
+    if (!process.env.AUDIT_DB_HOST) {
+      return res.status(400).json({ error: 'Database not configured. Please configure in Settings.' });
+    }
+
     await auditAgent.startListening(async (notification) => {
       // Save to database
       const log = await prisma.auditLog.create({
@@ -54,6 +59,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponseS
     isListening = true;
     res.status(200).json({ message: 'Started listening' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('Error starting audit log stream:', error);
+    res.status(500).json({ error: error.message || 'Failed to start listening' });
   }
 }

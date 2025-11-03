@@ -75,15 +75,19 @@ export class AuditAgent {
   }
 
   async startListening(callback: (notification: any) => void) {
-    if (!this.client) throw new Error('Not connected');
+    // Parse DATABASE_URL to get connection config
+    const dbUrl = process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/audit_db';
+    const url = new URL(dbUrl);
+    
+    const config = {
+      host: url.hostname,
+      port: parseInt(url.port || '5432'),
+      database: url.pathname.slice(1), // Remove leading /
+      user: url.username,
+      password: url.password,
+    };
 
-    this.listener = new Client({
-      host: process.env.AUDIT_DB_HOST,
-      port: parseInt(process.env.AUDIT_DB_PORT || '5432'),
-      database: process.env.AUDIT_DB_NAME,
-      user: process.env.AUDIT_DB_USER,
-      password: process.env.AUDIT_DB_PASSWORD,
-    });
+    this.listener = new Client(config);
 
     await this.listener.connect();
     await this.listener.query('LISTEN audit_channel');
